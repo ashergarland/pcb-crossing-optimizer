@@ -16,6 +16,8 @@ from crossing_analyzer import (
     extract_layer_pair_edges,
     sweep_optimize,
     format_multilayer_report,
+    report_to_dict,
+    _format_pin_ref,
     parse_netlist,
     infer_pin_order,
 )
@@ -394,3 +396,139 @@ def test_sweep_i2c_netlist():
     report = sweep_optimize(layers, {"J2"}, data["nets"])
     assert report.total_crossings_after <= report.total_crossings
     assert "J2" in report.optimized_orders
+
+
+# =========================================================================
+# Virtual node display cleanup
+# =========================================================================
+
+def test_format_pin_ref_real():
+    """Real refs display as ref.pin."""
+    assert _format_pin_ref("J1", "6") == "J1.6"
+    assert _format_pin_ref("R2", "1") == "R2.1"
+
+
+def test_format_pin_ref_virtual():
+    """Virtual refs display as [pass-through]."""
+    assert _format_pin_ref("_virt_L1", "_v3") == "[pass-through]"
+    assert _format_pin_ref("_virt_L0", "_v0") == "[pass-through]"
+
+
+def test_format_virtual_nodes_cleaned():
+    """format_multilayer_report hides virtual node internals in crossing descriptions."""
+    # Build a report with a crossing that includes a virtual node edge
+    edge_a = LayerEdge("net_A", "J1", "1", "_virt_L1", "_v0")
+    edge_b = LayerEdge("net_B", "J1", "2", "_virt_L1", "_v1")
+    from crossing_analyzer import LayerPairReport
+    pr = LayerPairReport(
+        source_layer_idx=0, target_layer_idx=1,
+        source_refs=["J1"], target_refs=["_virt_L1"],
+        crossing_count=1,
+        crossings=[LayerPairCrossing(edge_a, edge_b)],
+    )
+    report = MultilayerReport(
+        total_crossings=1, total_crossings_after=1,
+        layer_pair_reports=[pr],
+        original_orders={}, optimized_orders={},
+        iterations=1,
+    )
+    text = format_multilayer_report(report, {})
+    assert "_virt_" not in text
+    assert "[pass-through]" in text
+
+
+# =========================================================================
+# report_to_dict
+# =========================================================================
+
+def test_report_to_dict_structure():
+    """report_to_dict returns expected top-level keys."""
+    report = MultilayerReport(
+        total_crossings=5, total_crossings_after=2,
+        layer_pair_reports=[],
+        original_orders={"J1": ["1", "2"]},
+        optimized_orders={"J1": ["2", "1"]},
+        iterations=3,
+    )
+    d = report_to_dict(report, {})
+    assert d["total_crossings_before"] == 5
+    assert d["total_crossings_after"] == 2
+    assert d["iterations"] == 3
+    assert "J1" in d["reorderings"]
+    assert d["reorderings"]["J1"]["original"] == ["1", "2"]
+    assert d["reorderings"]["J1"]["optimized"] == ["2", "1"]
+
+
+def test_report_to_dict_no_virtual_refs():
+    """report_to_dict uses [pass-through] for virtual node refs."""
+    edge_a = LayerEdge("net_X", "J1", "1", "_virt_L1", "_v0")
+    edge_b = LayerEdge("net_Y", "J1", "2", "_virt_L1", "_v1")
+    from crossing_analyzer import LayerPairReport
+    pr = LayerPairReport(
+        source_layer_idx=0, target_layer_idx=1,
+        source_refs=["J1"], target_refs=["_virt_L1"],
+        crossing_count=1,
+        crossings=[LayerPairCrossing(edge_a, edge_b)],
+    )
+    report = MultilayerReport(
+        total_crossings=1, total_crossings_after=1,
+        layer_pair_reports=[pr],
+        original_orders={}, optimized_orders={},
+        iterations=1,
+    )
+    d = report_to_dict(report, {})
+    import json
+    text = json.dumps(d)
+    assert "_virt_" not in text
+    assert "[pass-through]" in text
+
+
+# =========================================================================
+# CLI tests (subprocess)
+# =========================================================================
+
+import subprocess
+
+def _run_cli(*args: str) -> subprocess.CompletedProcess:
+    """Run crossing-analyzer CLI via python -m style."""
+    src = str(Path(__file__).resolve().parent.parent / "src" / "crossing_analyzer.py")
+    return subprocess.run(
+        [sys.executable, src, *args],
+        capture_output=True, text=True,
+    )
+
+
+def test_cli_json_output():
+    """--json flag produces valid JSON output."""
+    netlist = str(Path(__file__).resolve().parent.parent / "examples" / "i2c_breakout.net")
+    if not Path(netlist).exists():
+        return
+    result = _run_cli(netlist, "--layers", "J1 | J2", "--reorderable", "J2", "--json")
+    import json
+    data = json.loads(result.stdout)
+    assert "total_crossings_before" in data
+    assert "total_crossings_after" in data
+    assert "reorderings" in data
+    assert "_virt_" not in result.stdout
+
+
+def test_cli_quiet_exit_code_zero():
+    """--quiet suppresses output; exit 0 when no crossings remain."""
+    netlist = str(Path(__file__).resolve().parent.parent / "examples" / "i2c_breakout.net")
+    if not Path(netlist).exists():
+        return
+    result = _run_cli(netlist, "--layers", "J1 | J2", "--reorderable", "J2", "--quiet")
+    # i2c 2-layer case should be fully resolvable -> exit 0
+    assert result.stdout.strip() == ""
+    assert result.returncode == 0
+
+
+def test_cli_quiet_exit_code_one():
+    """--quiet with unsolvable crossings returns exit code 1."""
+    netlist = str(Path(__file__).resolve().parent.parent / "examples" / "microsd_breakout.net")
+    if not Path(netlist).exists():
+        return
+    # microSD 3-layer case has unavoidable crossings
+    result = _run_cli(netlist, "--layers", "J1 | R1,R2,C1 | J2", "--reorderable", "J2", "--exclude", "J1:SH", "--quiet")
+    assert result.stdout.strip() == ""
+    assert result.returncode == 1

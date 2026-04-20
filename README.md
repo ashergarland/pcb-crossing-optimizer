@@ -2,20 +2,38 @@
 
 Multi-layer crossing minimization for PCB connector pin assignment. Detects trace crossings in SKiDL-generated KiCad netlists and computes optimal pin orderings for single-layer routing using Sugiyama-style barycenter sweep.
 
+## Installation
+
+```
+pip install -e .
+```
+
+After installation, the `crossing-analyzer` command is available on your PATH.
+
 ## Usage
 
 ```
-python src/crossing_analyzer.py <netlist.net> --layers "L0_refs | L1_refs | L2_refs" --reorderable REF [REF ...] [--exclude REF:PIN ...]
+crossing-analyzer <netlist.net> --layers "L0_refs | L1_refs | L2_refs" --reorderable REF [REF ...] [--exclude REF:PIN ...] [--json] [--quiet]
 ```
 
 Analyze the microSD breakout with passives in the middle layer:
 ```
-python src/crossing_analyzer.py examples/microsd_breakout.net --layers "J1 | R1,R2,C1 | J2" --reorderable J2 --exclude J1:SH
+crossing-analyzer examples/microsd_breakout.net --layers "J1 | R1,R2,C1 | J2" --reorderable J2 --exclude J1:SH
 ```
 
 Simple two-connector case (just use two layers):
 ```
-python src/crossing_analyzer.py examples/i2c_breakout.net --layers "J1 | J2" --reorderable J2
+crossing-analyzer examples/i2c_breakout.net --layers "J1 | J2" --reorderable J2
+```
+
+JSON output for tooling integration:
+```
+crossing-analyzer examples/i2c_breakout.net --layers "J1 | J2" --reorderable J2 --json
+```
+
+Quiet mode for CI (exit code 0 = no crossings, 1 = crossings remain):
+```
+crossing-analyzer examples/i2c_breakout.net --layers "J1 | J2" --reorderable J2 --quiet
 ```
 
 Nets spanning non-adjacent layers (e.g., J1 to J2 through a passive layer)
@@ -43,7 +61,7 @@ examples/                   Sample netlists for testing
 
 ```
 pip install pytest
-pytest tests/ -v
+pytest -v
 ```
 
 ## Roadmap

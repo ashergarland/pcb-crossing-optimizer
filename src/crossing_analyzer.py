@@ -16,6 +16,7 @@ Programmatic usage from SKiDL scripts:
 
 from __future__ import annotations
 
+import json
 import re
 import sys
 from dataclasses import dataclass, field
@@ -79,6 +80,17 @@ class MultilayerReport:
     original_orders: dict[str, list[str]]
     optimized_orders: dict[str, list[str]]
     iterations: int
+
+
+# =========================================================================
+# Formatting helpers
+# =========================================================================
+
+def _format_pin_ref(ref: str, pin: str) -> str:
+    """Format a pin reference for display, hiding virtual node internals."""
+    if ref.startswith("_virt_"):
+        return "[pass-through]"
+    return f"{ref}.{pin}"
 
 
 # =========================================================================
@@ -625,21 +637,25 @@ def format_multilayer_report(
     lines.append("")
 
     for pair_report in report.layer_pair_reports:
-        src = ", ".join(pair_report.source_refs)
-        tgt = ", ".join(pair_report.target_refs)
+        src = ", ".join(r for r in pair_report.source_refs if not r.startswith("_virt_"))
+        tgt = ", ".join(r for r in pair_report.target_refs if not r.startswith("_virt_"))
+        src_label = src or "[pass-through]"
+        tgt_label = tgt or "[pass-through]"
         lines.append(
-            f"Layer {pair_report.source_layer_idx} [{src}] -> "
-            f"Layer {pair_report.target_layer_idx} [{tgt}]"
+            f"Layer {pair_report.source_layer_idx} [{src_label}] -> "
+            f"Layer {pair_report.target_layer_idx} [{tgt_label}]"
         )
         lines.append(f"  Crossings: {pair_report.crossing_count}")
         for i, cp in enumerate(pair_report.crossings, 1):
+            a_src = _format_pin_ref(cp.edge_a.source_ref, cp.edge_a.source_pin)
+            a_tgt = _format_pin_ref(cp.edge_a.target_ref, cp.edge_a.target_pin)
+            b_src = _format_pin_ref(cp.edge_b.source_ref, cp.edge_b.source_pin)
+            b_tgt = _format_pin_ref(cp.edge_b.target_ref, cp.edge_b.target_pin)
             lines.append(
                 f"    {i}. {cp.edge_a.net_name} "
-                f"({cp.edge_a.source_ref}.{cp.edge_a.source_pin} -> "
-                f"{cp.edge_a.target_ref}.{cp.edge_a.target_pin})  X  "
+                f"({a_src} -> {a_tgt})  X  "
                 f"{cp.edge_b.net_name} "
-                f"({cp.edge_b.source_ref}.{cp.edge_b.source_pin} -> "
-                f"{cp.edge_b.target_ref}.{cp.edge_b.target_pin})"
+                f"({b_src} -> {b_tgt})"
             )
         lines.append("")
 
@@ -667,6 +683,52 @@ def format_multilayer_report(
         )
 
     return "\n".join(lines)
+
+
+def report_to_dict(
+    report: MultilayerReport,
+    nets: dict[str, list[tuple[str, str]]],
+) -> dict:
+    """Convert a MultilayerReport to a JSON-serializable dict."""
+    layer_pairs = []
+    for pr in report.layer_pair_reports:
+        crossings = []
+        for cp in pr.crossings:
+            crossings.append({
+                "edge_a": {
+                    "net": cp.edge_a.net_name,
+                    "source": _format_pin_ref(cp.edge_a.source_ref, cp.edge_a.source_pin),
+                    "target": _format_pin_ref(cp.edge_a.target_ref, cp.edge_a.target_pin),
+                },
+                "edge_b": {
+                    "net": cp.edge_b.net_name,
+                    "source": _format_pin_ref(cp.edge_b.source_ref, cp.edge_b.source_pin),
+                    "target": _format_pin_ref(cp.edge_b.target_ref, cp.edge_b.target_pin),
+                },
+            })
+        layer_pairs.append({
+            "source_layer": pr.source_layer_idx,
+            "target_layer": pr.target_layer_idx,
+            "source_refs": [r for r in pr.source_refs if not r.startswith("_virt_")],
+            "target_refs": [r for r in pr.target_refs if not r.startswith("_virt_")],
+            "crossing_count": pr.crossing_count,
+            "crossings": crossings,
+        })
+
+    reorderings = {}
+    for ref in sorted(report.optimized_orders):
+        orig = report.original_orders.get(ref, [])
+        opt = report.optimized_orders[ref]
+        if orig != opt:
+            reorderings[ref] = {"original": orig, "optimized": opt}
+
+    return {
+        "total_crossings_before": report.total_crossings,
+        "total_crossings_after": report.total_crossings_after,
+        "iterations": report.iterations,
+        "layer_pairs": layer_pairs,
+        "reorderings": reorderings,
+    }
 
 
 # =========================================================================
@@ -701,6 +763,14 @@ def main():
         "--exclude", nargs="*", default=[], metavar="REF:PIN",
         help="Exclude pins from analysis (e.g. J1:SH).",
     )
+    parser.add_argument(
+        "--json", action="store_true", dest="json_output",
+        help="Output results as JSON instead of human-readable text.",
+    )
+    parser.add_argument(
+        "--quiet", "-q", action="store_true",
+        help="Suppress all output; exit code 0 = no crossings, 1 = crossings remain.",
+    )
     args = parser.parse_args()
 
     if not Path(args.netlist).exists():
@@ -719,7 +789,9 @@ def main():
     # Parse netlist
     data = parse_netlist(args.netlist)
 
-    if exclude_set:
+    verbose = not args.quiet and not args.json_output
+
+    if exclude_set and verbose:
         excluded_str = ", ".join(f"{r}:{p}" for r, p in sorted(exclude_set))
         print(f"(Excluding pins: {excluded_str})")
         print()
@@ -740,7 +812,7 @@ def main():
 
     # Build reorderable set
     reorderable_refs = set(args.reorderable)
-    if not reorderable_refs:
+    if not reorderable_refs and verbose:
         print("Warning: no --reorderable refs specified; no optimization possible.")
 
     # Build layer PinColumn lists, applying exclusions
@@ -756,16 +828,23 @@ def main():
         layers.append(layer)
 
     # Print layer summary
-    print("Layer assignment:")
-    for i, layer in enumerate(layers):
-        refs = ", ".join(c.ref for c in layer)
-        pins = sum(len(c.pin_order) for c in layer)
-        print(f"  Layer {i}: [{refs}] ({pins} pins)")
-    print()
+    if verbose:
+        print("Layer assignment:")
+        for i, layer in enumerate(layers):
+            refs = ", ".join(c.ref for c in layer)
+            pins = sum(len(c.pin_order) for c in layer)
+            print(f"  Layer {i}: [{refs}] ({pins} pins)")
+        print()
 
     # Run sweep
     report = sweep_optimize(layers, reorderable_refs, data["nets"])
-    print(format_multilayer_report(report, data["nets"]))
+
+    if args.json_output:
+        print(json.dumps(report_to_dict(report, data["nets"]), indent=2))
+    elif not args.quiet:
+        print(format_multilayer_report(report, data["nets"]))
+
+    sys.exit(0 if report.total_crossings_after == 0 else 1)
 
 
 if __name__ == "__main__":
