@@ -74,6 +74,49 @@ class CrossingReport:
 
 
 # =========================================================================
+# Multi-layer data model
+# =========================================================================
+
+@dataclass
+class LayerEdge:
+    """An edge between pins on components in adjacent layers."""
+    net_name: str
+    source_ref: str
+    source_pin: str
+    target_ref: str
+    target_pin: str
+
+
+@dataclass
+class LayerPairCrossing:
+    """Two edges between adjacent layers that cross."""
+    edge_a: LayerEdge
+    edge_b: LayerEdge
+
+
+@dataclass
+class LayerPairReport:
+    """Crossing report for one pair of adjacent layers."""
+    source_layer_idx: int
+    target_layer_idx: int
+    source_refs: list[str]
+    target_refs: list[str]
+    crossing_count: int
+    crossings: list[LayerPairCrossing]
+
+
+@dataclass
+class MultilayerReport:
+    """Full crossing analysis across all layer pairs."""
+    total_crossings: int
+    total_crossings_after: int
+    layer_pair_reports: list[LayerPairReport]
+    original_orders: dict[str, list[str]]
+    optimized_orders: dict[str, list[str]]
+    iterations: int
+
+
+# =========================================================================
 # Core analysis (pure data in / data out)
 # =========================================================================
 
@@ -150,6 +193,398 @@ def analyze_connectors(
         current_order=list(reorderable.pin_order),
         optimal_order=optimal_order,
         optimal_crossing_count=len(optimal_crossings),
+    )
+
+
+# =========================================================================
+# Multi-layer analysis (Sugiyama-style barycenter sweep)
+# =========================================================================
+
+def layer_global_positions(
+    components: list[PinColumn],
+) -> dict[tuple[str, str], int]:
+    """Map (ref, pin) to a global position index across a layer.
+
+    Components are laid out sequentially: if component A has 3 pins and
+    component B has 2 pins, B's first pin is at position 3.
+    """
+    pos = 0
+    result: dict[tuple[str, str], int] = {}
+    for comp in components:
+        for pin in comp.pin_order:
+            result[(comp.ref, pin)] = pos
+            pos += 1
+    return result
+
+
+def count_layer_pair_crossings(
+    source_layer: list[PinColumn],
+    target_layer: list[PinColumn],
+    edges: list[LayerEdge],
+) -> list[LayerPairCrossing]:
+    """Count crossings between edges connecting two adjacent layers.
+
+    Generalizes count_crossings() to multi-component layers with
+    global position indices.
+    """
+    source_pos = layer_global_positions(source_layer)
+    target_pos = layer_global_positions(target_layer)
+
+    # Filter to edges that have valid positions in both layers
+    valid_edges: list[LayerEdge] = []
+    for e in edges:
+        sk = (e.source_ref, e.source_pin)
+        tk = (e.target_ref, e.target_pin)
+        if sk in source_pos and tk in target_pos:
+            valid_edges.append(e)
+
+    crossings: list[LayerPairCrossing] = []
+    for a, b in combinations(valid_edges, 2):
+        si = source_pos[(a.source_ref, a.source_pin)]
+        sk = source_pos[(b.source_ref, b.source_pin)]
+        tj = target_pos[(a.target_ref, a.target_pin)]
+        tl = target_pos[(b.target_ref, b.target_pin)]
+        if (si < sk and tj > tl) or (si > sk and tj < tl):
+            crossings.append(LayerPairCrossing(a, b))
+    return crossings
+
+
+def extract_layer_pair_edges(
+    nets: dict[str, list[tuple[str, str]]],
+    source_refs: set[str],
+    target_refs: set[str],
+) -> list[LayerEdge]:
+    """Extract edges between two sets of components from parsed net data.
+
+    A net produces edges if it has pins on components in both the source
+    and target sets.
+    """
+    edges: list[LayerEdge] = []
+    for net_name, nodes in nets.items():
+        source_pins = [(ref, pin) for ref, pin in nodes if ref in source_refs]
+        target_pins = [(ref, pin) for ref, pin in nodes if ref in target_refs]
+        for sref, spin in source_pins:
+            for tref, tpin in target_pins:
+                edges.append(LayerEdge(
+                    net_name=net_name,
+                    source_ref=sref, source_pin=spin,
+                    target_ref=tref, target_pin=tpin,
+                ))
+    return edges
+
+
+def _compute_multilayer_barycenters(
+    component_ref: str,
+    adjacent_layer: list[PinColumn],
+    edges: list[LayerEdge],
+) -> dict[str, float]:
+    """Compute barycenter for each pin of a component based on its
+    connections to an adjacent layer.
+
+    Works regardless of whether the component is on the source or target
+    side of the edges.
+    """
+    adj_pos = layer_global_positions(adjacent_layer)
+
+    pin_positions: dict[str, list[int]] = {}
+    for edge in edges:
+        if edge.source_ref == component_ref:
+            pin = edge.source_pin
+            adj_key = (edge.target_ref, edge.target_pin)
+        elif edge.target_ref == component_ref:
+            pin = edge.target_pin
+            adj_key = (edge.source_ref, edge.source_pin)
+        else:
+            continue
+
+        if adj_key in adj_pos:
+            pin_positions.setdefault(pin, []).append(adj_pos[adj_key])
+
+    barycenters: dict[str, float] = {}
+    for pin, positions in pin_positions.items():
+        barycenters[pin] = sum(positions) / len(positions)
+
+    return barycenters
+
+
+def _reorder_pins_by_barycenter(
+    component: PinColumn,
+    barycenters: dict[str, float],
+) -> PinColumn:
+    """Reorder a component's pins by their barycenter values.
+
+    Pins without a barycenter (unconnected to the adjacent layer)
+    keep their relative order and are placed at the end.
+    """
+    connected = [p for p in component.pin_order if p in barycenters]
+    unconnected = [p for p in component.pin_order if p not in barycenters]
+    connected.sort(key=lambda p: barycenters[p])
+    return PinColumn(ref=component.ref, pin_order=connected + unconnected)
+
+
+def _reorder_components_in_layer(
+    layer: list[PinColumn],
+    adjacent_layer: list[PinColumn],
+    edges: list[LayerEdge],
+) -> list[PinColumn]:
+    """Reorder components within a layer by their aggregate barycenter.
+
+    Each component's aggregate barycenter is the average of all its
+    pin barycenters relative to the adjacent layer.
+    """
+    adj_pos = layer_global_positions(adjacent_layer)
+
+    comp_barycenters: dict[str, float] = {}
+    for comp in layer:
+        positions: list[int] = []
+        for edge in edges:
+            if edge.source_ref == comp.ref:
+                adj_key = (edge.target_ref, edge.target_pin)
+            elif edge.target_ref == comp.ref:
+                adj_key = (edge.source_ref, edge.source_pin)
+            else:
+                continue
+            if adj_key in adj_pos:
+                positions.append(adj_pos[adj_key])
+
+        if positions:
+            comp_barycenters[comp.ref] = sum(positions) / len(positions)
+        else:
+            comp_barycenters[comp.ref] = float("inf")
+
+    return sorted(layer, key=lambda c: comp_barycenters[c.ref])
+
+
+def _build_component_layer_map(
+    layers: list[list[PinColumn]],
+) -> dict[str, int]:
+    """Map component ref -> layer index."""
+    result: dict[str, int] = {}
+    for i, layer in enumerate(layers):
+        for comp in layer:
+            result[comp.ref] = i
+    return result
+
+
+def _expand_with_virtual_nodes(
+    layers: list[list[PinColumn]],
+    nets: dict[str, list[tuple[str, str]]],
+) -> tuple[list[list[PinColumn]], list[list[LayerEdge]], set[str]]:
+    """Insert virtual nodes for long edges spanning non-adjacent layers.
+
+    For a net connecting components in layers 0 and 2, a virtual pin is
+    inserted in layer 1 so the sweep can account for all routing paths.
+
+    Only pins present in the layers' pin_order lists are considered,
+    so caller exclusions are automatically respected.
+
+    Returns:
+        expanded_layers: layers with virtual PinColumn added where needed.
+        layer_pair_edges: pre-computed edge list for each adjacent pair.
+        virtual_refs: set of virtual component refs (always reorderable).
+    """
+    comp_layer = _build_component_layer_map(layers)
+    n_layers = len(layers)
+
+    # Build set of active (ref, pin) from the layer data
+    active_pins: set[tuple[str, str]] = set()
+    for layer in layers:
+        for comp in layer:
+            for pin in comp.pin_order:
+                active_pins.add((comp.ref, pin))
+
+    # Collect virtual pins needed per intermediate layer
+    virt_pins_per_layer: dict[int, list[str]] = {}
+    virt_counter = 0
+
+    # Build edge lists for each layer pair
+    pair_edges: list[list[LayerEdge]] = [[] for _ in range(n_layers - 1)]
+
+    for net_name, nodes in nets.items():
+        # Group nodes by layer, filtering to active pins only
+        nodes_by_layer: dict[int, list[tuple[str, str]]] = {}
+        for ref, pin in nodes:
+            if ref not in comp_layer:
+                continue
+            if (ref, pin) not in active_pins:
+                continue
+            li = comp_layer[ref]
+            nodes_by_layer.setdefault(li, []).append((ref, pin))
+
+        # For each pair of layer groups, create edges
+        sorted_layers = sorted(nodes_by_layer.keys())
+        for a_idx in range(len(sorted_layers)):
+            for b_idx in range(a_idx + 1, len(sorted_layers)):
+                src_li = sorted_layers[a_idx]
+                tgt_li = sorted_layers[b_idx]
+                gap = tgt_li - src_li
+
+                for sref, spin in nodes_by_layer[src_li]:
+                    for tref, tpin in nodes_by_layer[tgt_li]:
+                        if gap == 1:
+                            # Direct edge: no virtual nodes needed
+                            pair_edges[src_li].append(
+                                LayerEdge(net_name, sref, spin, tref, tpin)
+                            )
+                        else:
+                            # Long edge: create virtual pins in intermediate layers
+                            chain: list[tuple[str, str]] = [(sref, spin)]
+                            for mid_li in range(src_li + 1, tgt_li):
+                                vref = f"_virt_L{mid_li}"
+                                vid = f"_v{virt_counter}"
+                                virt_counter += 1
+                                virt_pins_per_layer.setdefault(mid_li, []).append(vid)
+                                chain.append((vref, vid))
+                            chain.append((tref, tpin))
+
+                            # Create edge segments along the chain
+                            for seg in range(len(chain) - 1):
+                                sr, sp = chain[seg]
+                                tr, tp = chain[seg + 1]
+                                edge_li = src_li + seg
+                                pair_edges[edge_li].append(
+                                    LayerEdge(net_name, sr, sp, tr, tp)
+                                )
+
+    # Build expanded layers with virtual PinColumns
+    expanded: list[list[PinColumn]] = []
+    virtual_refs: set[str] = set()
+    for i, layer in enumerate(layers):
+        new_layer = [
+            PinColumn(ref=c.ref, pin_order=list(c.pin_order)) for c in layer
+        ]
+        if i in virt_pins_per_layer:
+            vref = f"_virt_L{i}"
+            virtual_refs.add(vref)
+            new_layer.append(PinColumn(ref=vref, pin_order=virt_pins_per_layer[i]))
+        expanded.append(new_layer)
+
+    return expanded, pair_edges, virtual_refs
+
+
+def sweep_optimize(
+    layers: list[list[PinColumn]],
+    reorderable_refs: set[str],
+    nets: dict[str, list[tuple[str, str]]],
+    max_iterations: int = 10,
+) -> MultilayerReport:
+    """Minimize crossings across all layer pairs using Sugiyama-style
+    barycenter sweep.
+
+    Handles long edges (nets spanning non-adjacent layers) by inserting
+    virtual nodes in intermediate layers so the sweep accounts for all
+    routing paths.
+
+    Args:
+        layers: List of layers, each layer is a list of PinColumn objects.
+                layers[0] is the leftmost/topmost layer.
+        reorderable_refs: Set of component refs whose pin order can change.
+        nets: Parsed netlist data (net_name -> [(ref, pin), ...]).
+        max_iterations: Maximum forward+backward sweep iterations.
+
+    Returns:
+        MultilayerReport with crossing counts before/after and optimized orders.
+    """
+    # Save original orders before any modification
+    original_orders: dict[str, list[str]] = {}
+    for layer in layers:
+        for comp in layer:
+            original_orders[comp.ref] = list(comp.pin_order)
+
+    # Expand layers with virtual nodes for long edges
+    layers, layer_pair_edges, virtual_refs = _expand_with_virtual_nodes(layers, nets)
+
+    # Virtual nodes are always reorderable
+    all_reorderable = reorderable_refs | virtual_refs
+
+    # Count initial crossings
+    def total_crossing_count() -> int:
+        total = 0
+        for i, edges in enumerate(layer_pair_edges):
+            crossings = count_layer_pair_crossings(
+                layers[i], layers[i + 1], edges,
+            )
+            total += len(crossings)
+        return total
+
+    initial_total = total_crossing_count()
+    best_total = initial_total
+    iterations = 0
+
+    for iteration in range(max_iterations):
+        improved = False
+
+        # Forward sweep: fix layer i, optimize layer i+1
+        for i in range(len(layers) - 1):
+            edges = layer_pair_edges[i]
+            new_layer: list[PinColumn] = []
+            for comp in layers[i + 1]:
+                if comp.ref in all_reorderable:
+                    bc = _compute_multilayer_barycenters(
+                        comp.ref, layers[i], edges,
+                    )
+                    new_layer.append(_reorder_pins_by_barycenter(comp, bc))
+                else:
+                    new_layer.append(comp)
+            layers[i + 1] = _reorder_components_in_layer(
+                new_layer, layers[i], edges,
+            )
+
+        # Backward sweep: fix layer i+1, optimize layer i
+        for i in range(len(layers) - 2, -1, -1):
+            edges = layer_pair_edges[i]
+            new_layer = []
+            for comp in layers[i]:
+                if comp.ref in all_reorderable:
+                    bc = _compute_multilayer_barycenters(
+                        comp.ref, layers[i + 1], edges,
+                    )
+                    new_layer.append(_reorder_pins_by_barycenter(comp, bc))
+                else:
+                    new_layer.append(comp)
+            layers[i] = _reorder_components_in_layer(
+                new_layer, layers[i + 1], edges,
+            )
+
+        current_total = total_crossing_count()
+        iterations = iteration + 1
+
+        if current_total < best_total:
+            best_total = current_total
+            improved = True
+
+        if not improved:
+            break
+
+    # Build layer pair reports for final state (filter out virtual refs from display)
+    pair_reports: list[LayerPairReport] = []
+    for i, edges in enumerate(layer_pair_edges):
+        crossings = count_layer_pair_crossings(
+            layers[i], layers[i + 1], edges,
+        )
+        pair_reports.append(LayerPairReport(
+            source_layer_idx=i,
+            target_layer_idx=i + 1,
+            source_refs=[c.ref for c in layers[i] if c.ref not in virtual_refs],
+            target_refs=[c.ref for c in layers[i + 1] if c.ref not in virtual_refs],
+            crossing_count=len(crossings),
+            crossings=crossings,
+        ))
+
+    # Collect optimized orders (real components only)
+    optimized_orders: dict[str, list[str]] = {}
+    for layer in layers:
+        for comp in layer:
+            if comp.ref not in virtual_refs:
+                optimized_orders[comp.ref] = list(comp.pin_order)
+
+    return MultilayerReport(
+        total_crossings=initial_total,
+        total_crossings_after=best_total,
+        layer_pair_reports=pair_reports,
+        original_orders=original_orders,
+        optimized_orders=optimized_orders,
+        iterations=iterations,
     )
 
 
@@ -634,6 +1069,69 @@ def format_before_after(
 
 
 # =========================================================================
+# Multi-layer report formatting
+# =========================================================================
+
+def format_multilayer_report(
+    report: MultilayerReport,
+    nets: dict[str, list[tuple[str, str]]],
+) -> str:
+    """Format a MultilayerReport as human-readable text."""
+    lines: list[str] = []
+    lines.append("Multi-Layer Crossing Analysis")
+    lines.append("=" * 60)
+    lines.append("")
+    lines.append(f"Total crossings (before): {report.total_crossings}")
+    lines.append(f"Total crossings (after):  {report.total_crossings_after}")
+    lines.append(f"Sweep iterations:         {report.iterations}")
+    lines.append("")
+
+    for pair_report in report.layer_pair_reports:
+        src = ", ".join(pair_report.source_refs)
+        tgt = ", ".join(pair_report.target_refs)
+        lines.append(
+            f"Layer {pair_report.source_layer_idx} [{src}] -> "
+            f"Layer {pair_report.target_layer_idx} [{tgt}]"
+        )
+        lines.append(f"  Crossings: {pair_report.crossing_count}")
+        for i, cp in enumerate(pair_report.crossings, 1):
+            lines.append(
+                f"    {i}. {cp.edge_a.net_name} "
+                f"({cp.edge_a.source_ref}.{cp.edge_a.source_pin} -> "
+                f"{cp.edge_a.target_ref}.{cp.edge_a.target_pin})  X  "
+                f"{cp.edge_b.net_name} "
+                f"({cp.edge_b.source_ref}.{cp.edge_b.source_pin} -> "
+                f"{cp.edge_b.target_ref}.{cp.edge_b.target_pin})"
+            )
+        lines.append("")
+
+    # Show reordering recommendations
+    changed = {
+        ref for ref in report.optimized_orders
+        if report.optimized_orders[ref] != report.original_orders.get(ref)
+    }
+    if changed:
+        lines.append("Recommended pin reorderings:")
+        for ref in sorted(changed):
+            original = ", ".join(report.original_orders[ref])
+            optimized = ", ".join(report.optimized_orders[ref])
+            lines.append(f"  {ref}: [{original}] -> [{optimized}]")
+    else:
+        lines.append("No reordering needed.")
+
+    if report.total_crossings_after > 0:
+        lines.append("")
+        lines.append(
+            "WARNING: Not all crossings can be eliminated by reordering alone."
+        )
+        lines.append(
+            "Remaining crossings will require vias or a second routing layer."
+        )
+
+    return "\n".join(lines)
+
+
+# =========================================================================
 # CLI entry point
 # =========================================================================
 
@@ -641,21 +1139,42 @@ def main():
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="Analyze trace crossings between two connectors in a KiCad netlist.",
-        epilog="Example: python tools/crossing_analyzer.py "
-               "output/netlists/microsd_breakout.net J1 J2 --exclude J1:SH",
+        description="Analyze trace crossings in a KiCad netlist.",
+        epilog=(
+            "Pair mode:  crossing_analyzer.py net.net J1 J2 --exclude J1:SH\n"
+            "Sweep mode: crossing_analyzer.py net.net --layers 'J1 | R1,C1 | J2' "
+            "--reorderable J2"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("netlist", help="Path to a KiCad .net file generated by SKiDL")
-    parser.add_argument("fixed_ref", help="Reference designator of the fixed connector (e.g. J1)")
-    parser.add_argument("reorderable_ref", help="Reference designator of the reorderable connector (e.g. J2)")
+    parser.add_argument(
+        "fixed_ref", nargs="?", default=None,
+        help="(Pair mode) Reference designator of the fixed connector (e.g. J1)",
+    )
+    parser.add_argument(
+        "reorderable_ref", nargs="?", default=None,
+        help="(Pair mode) Reference designator of the reorderable connector (e.g. J2)",
+    )
     parser.add_argument(
         "--exclude", nargs="*", default=[], metavar="REF:PIN",
-        help="Exclude pins from analysis (e.g. J1:SH). "
-             "Useful for shield/mounting pins that are not in the signal routing channel.",
+        help="Exclude pins from analysis (e.g. J1:SH).",
     )
     parser.add_argument(
         "--diagram", action="store_true",
-        help="Show ASCII routing diagrams and connection matrices (before/after).",
+        help="Show ASCII routing diagrams and connection matrices.",
+    )
+    parser.add_argument(
+        "--layers", type=str, default=None,
+        help=(
+            "(Sweep mode) Layer specification: components per layer separated by |. "
+            "Multiple components in a layer separated by commas. "
+            "Example: 'J1 | R1,R2,C1 | J2'"
+        ),
+    )
+    parser.add_argument(
+        "--reorderable", nargs="*", default=[], metavar="REF",
+        help="(Sweep mode) Components whose pin order can be changed.",
     )
     args = parser.parse_args()
 
@@ -675,17 +1194,33 @@ def main():
     # Parse netlist
     data = parse_netlist(args.netlist)
 
+    if exclude_set:
+        excluded_str = ", ".join(f"{r}:{p}" for r, p in sorted(exclude_set))
+        print(f"(Excluding pins: {excluded_str})")
+        print()
+
+    # Dispatch to the appropriate mode
+    if args.layers is not None:
+        _main_sweep(args, data, exclude_set)
+    elif args.fixed_ref and args.reorderable_ref:
+        _main_pair(args, data, exclude_set)
+    else:
+        print("Error: provide either (fixed_ref, reorderable_ref) for pair mode")
+        print("       or --layers for sweep mode.")
+        sys.exit(1)
+
+
+def _main_pair(args, data: dict, exclude_set: set[tuple[str, str]]):
+    """Pair mode: analyze crossings between two connectors."""
     fixed_ref = args.fixed_ref
     reorderable_ref = args.reorderable_ref
 
-    # Validate refs exist
     for ref in (fixed_ref, reorderable_ref):
         if ref not in data["components"]:
             print(f"Error: component '{ref}' not found in netlist.")
-            print(f"Available components: {', '.join(sorted(data['components'].keys()))}")
+            print(f"Available: {', '.join(sorted(data['components'].keys()))}")
             sys.exit(1)
 
-    # Infer pin orders from netlist, applying exclusions
     fixed_pins = [
         p for p in infer_pin_order(fixed_ref, data["nets"])
         if (fixed_ref, p) not in exclude_set
@@ -698,7 +1233,6 @@ def main():
     fixed = PinColumn(ref=fixed_ref, pin_order=fixed_pins)
     reorderable = PinColumn(ref=reorderable_ref, pin_order=reorderable_pins)
 
-    # Extract edges, filtering out excluded pins
     edges = [
         e for e in extract_edges(data["nets"], fixed_ref, reorderable_ref)
         if (fixed_ref, e.fixed_pin) not in exclude_set
@@ -709,18 +1243,9 @@ def main():
         print(f"No nets connect {fixed_ref} and {reorderable_ref}.")
         sys.exit(0)
 
-    if exclude_set:
-        excluded_str = ", ".join(f"{r}:{p}" for r, p in sorted(exclude_set))
-        print(f"(Excluding pins: {excluded_str})")
-        print()
-
-    # Analyze
     report = analyze_connectors(fixed, reorderable, edges)
-
-    # Print report
     print(format_report_with_nets(report, edges))
 
-    # Optional diagram output
     if args.diagram:
         pin_to_net: dict[str, str] = {}
         for edge in edges:
@@ -729,11 +1254,9 @@ def main():
         optimal = PinColumn(ref=reorderable_ref, pin_order=report.optimal_order)
 
         if report.crossing_count > 0:
-            # Show before/after comparison
             print()
             print(format_before_after(fixed, reorderable, optimal, edges, pin_to_net))
         else:
-            # Already optimal, show current layout
             print()
             print(format_routing_diagram(
                 fixed, reorderable, edges, pin_to_net,
@@ -744,6 +1267,52 @@ def main():
                 fixed, reorderable, edges, pin_to_net,
                 label="CONNECTION MATRIX",
             ))
+
+
+def _main_sweep(args, data: dict, exclude_set: set[tuple[str, str]]):
+    """Sweep mode: multi-layer crossing analysis."""
+    # Parse layer specification: "J1 | R1,R2,C1 | J2"
+    layer_specs = [
+        [ref.strip() for ref in group.split(",")]
+        for group in args.layers.split("|")
+    ]
+
+    # Validate all refs exist
+    all_refs = [ref for group in layer_specs for ref in group]
+    for ref in all_refs:
+        if ref not in data["components"]:
+            print(f"Error: component '{ref}' not found in netlist.")
+            print(f"Available: {', '.join(sorted(data['components'].keys()))}")
+            sys.exit(1)
+
+    # Build reorderable set
+    reorderable_refs = set(args.reorderable)
+    if not reorderable_refs:
+        print("Warning: no --reorderable refs specified; no optimization possible.")
+
+    # Build layer PinColumn lists, applying exclusions
+    layers: list[list[PinColumn]] = []
+    for group in layer_specs:
+        layer: list[PinColumn] = []
+        for ref in group:
+            pins = [
+                p for p in infer_pin_order(ref, data["nets"])
+                if (ref, p) not in exclude_set
+            ]
+            layer.append(PinColumn(ref=ref, pin_order=pins))
+        layers.append(layer)
+
+    # Print layer summary
+    print("Layer assignment:")
+    for i, layer in enumerate(layers):
+        refs = ", ".join(c.ref for c in layer)
+        pins = sum(len(c.pin_order) for c in layer)
+        print(f"  Layer {i}: [{refs}] ({pins} pins)")
+    print()
+
+    # Run sweep
+    report = sweep_optimize(layers, reorderable_refs, data["nets"])
+    print(format_multilayer_report(report, data["nets"]))
 
 
 if __name__ == "__main__":
