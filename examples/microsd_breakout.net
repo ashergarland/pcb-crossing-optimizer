@@ -1,0 +1,345 @@
+(export 
+  (version "D")
+  (design
+    (source "microsd_breakout.py")
+    (date "04/19/2026 07:04 PM")
+    (tool "SKiDL (2.2.2)")
+    (sheet
+      (number 1)
+      (name "/")
+      (tstamps "/")
+      (title_block
+        (title)
+        (company)
+        (rev)
+        (date)
+        (source "..\..\..\microsd_breakout.py")
+        (comment
+          (number "1")
+          (value ""))
+        (comment
+          (number "2")
+          (value ""))
+        (comment
+          (number "3")
+          (value ""))
+        (comment
+          (number "4")
+          (value ""))
+        (comment
+          (number "5")
+          (value ""))
+        (comment
+          (number "6")
+          (value ""))
+        (comment
+          (number "7")
+          (value ""))
+        (comment
+          (number "8")
+          (value ""))
+        (comment
+          (number "9")
+          (value "")))))
+  (components
+    (comp
+      (ref "C1")
+      (value "100n")
+      (description "Unpolarized capacitor")
+      (footprint "Capacitor_SMD:C_0805_2012Metric")
+      (fields
+        (field
+          (name "Description") "Unpolarized capacitor")
+        (field
+          (name "Footprint") "Capacitor_SMD:C_0805_2012Metric")
+        (field
+          (name "Datasheet"))
+        (field
+          (name "SKiDL Tag") "Mx111Q5Nh7")
+        (field
+          (name "SKiDL Line") "microsd_breakout.py:68"))
+      (libsource
+        (lib "Device")
+        (part "C"))
+      (sheetpath
+        (names "/")
+        (tstamps "/"))
+      (component_classes)
+      (tstamps "e4361d8f-d55f-5de0-a112-3c28769051b3"))
+    (comp
+      (ref "J1")
+      (value "microSD")
+      (description "Micro SD Card Socket")
+      (footprint "Connector_Card:microSD_HC_Hirose_DM3AT-SF-PEJM5")
+      (fields
+        (field
+          (name "Description") "Micro SD Card Socket")
+        (field
+          (name "Footprint") "Connector_Card:microSD_HC_Hirose_DM3AT-SF-PEJM5")
+        (field
+          (name "Datasheet") "https://www.we-online.com/components/products/datasheet/693072010801.pdf")
+        (field
+          (name "SKiDL Tag") "Y_jXOTDGAM")
+        (field
+          (name "SKiDL Line") "microsd_breakout.py:42"))
+      (libsource
+        (lib "Connector")
+        (part "Micro_SD_Card"))
+      (sheetpath
+        (names "/")
+        (tstamps "/"))
+      (component_classes)
+      (tstamps "f406868e-980a-5849-b647-196f7ec595aa"))
+    (comp
+      (ref "J2")
+      (value "SPI_HDR")
+      (description "Generic connector, single row, 01x06, script generated")
+      (footprint "Connector_PinHeader_2.54mm:PinHeader_1x06_P2.54mm_Vertical")
+      (fields
+        (field
+          (name "Description") "Generic connector, single row, 01x06, script generated")
+        (field
+          (name "Footprint") "Connector_PinHeader_2.54mm:PinHeader_1x06_P2.54mm_Vertical")
+        (field
+          (name "Datasheet"))
+        (field
+          (name "SKiDL Tag") "ZJ_XE4gcuj")
+        (field
+          (name "SKiDL Line") "microsd_breakout.py:59"))
+      (libsource
+        (lib "Connector")
+        (part "Conn_01x06_Pin"))
+      (sheetpath
+        (names "/")
+        (tstamps "/"))
+      (component_classes)
+      (tstamps "15389d2d-fda7-5cc5-8bce-4f705d295c40"))
+    (comp
+      (ref "R1")
+      (value "10k")
+      (description "Resistor")
+      (footprint "Resistor_SMD:R_0805_2012Metric")
+      (fields
+        (field
+          (name "Description") "Resistor")
+        (field
+          (name "Footprint") "Resistor_SMD:R_0805_2012Metric")
+        (field
+          (name "Datasheet"))
+        (field
+          (name "SKiDL Tag") "prWKdjekx9")
+        (field
+          (name "SKiDL Line") "microsd_breakout.py:80"))
+      (libsource
+        (lib "Device")
+        (part "R"))
+      (sheetpath
+        (names "/")
+        (tstamps "/"))
+      (component_classes)
+      (tstamps "7e787459-fd37-5691-9edd-e235d1ce55e6"))
+    (comp
+      (ref "R2")
+      (value "10k")
+      (description "Resistor")
+      (footprint "Resistor_SMD:R_0805_2012Metric")
+      (fields
+        (field
+          (name "Description") "Resistor")
+        (field
+          (name "Footprint") "Resistor_SMD:R_0805_2012Metric")
+        (field
+          (name "Datasheet"))
+        (field
+          (name "SKiDL Tag") "T87Jy6dmj_")
+        (field
+          (name "SKiDL Line") "microsd_breakout.py:86"))
+      (libsource
+        (lib "Device")
+        (part "R"))
+      (sheetpath
+        (names "/")
+        (tstamps "/"))
+      (component_classes)
+      (tstamps "1d3a8297-4124-520a-b0fe-595ad70cb8dd"))
+    (comp
+      (ref "R3")
+      (value "10k")
+      (description "Resistor")
+      (footprint "Resistor_SMD:R_0805_2012Metric")
+      (fields
+        (field
+          (name "Description") "Resistor")
+        (field
+          (name "Footprint") "Resistor_SMD:R_0805_2012Metric")
+        (field
+          (name "Datasheet"))
+        (field
+          (name "SKiDL Tag") "Ty7y5RcUSX")
+        (field
+          (name "SKiDL Line") "microsd_breakout.py:92"))
+      (libsource
+        (lib "Device")
+        (part "R"))
+      (sheetpath
+        (names "/")
+        (tstamps "/"))
+      (component_classes)
+      (tstamps "c6bf31dd-19a0-50f9-9319-01386ac4b7b0"))
+    (comp
+      (ref "R4")
+      (value "10k")
+      (description "Resistor")
+      (footprint "Resistor_SMD:R_0805_2012Metric")
+      (fields
+        (field
+          (name "Description") "Resistor")
+        (field
+          (name "Footprint") "Resistor_SMD:R_0805_2012Metric")
+        (field
+          (name "Datasheet"))
+        (field
+          (name "SKiDL Tag") "b05kcWOXIx")
+        (field
+          (name "SKiDL Line") "microsd_breakout.py:98"))
+      (libsource
+        (lib "Device")
+        (part "R"))
+      (sheetpath
+        (names "/")
+        (tstamps "/"))
+      (component_classes)
+      (tstamps "a6b7525a-2ff2-560a-9295-e87d3a3cf8de")))
+  (nets
+    (net
+      (code 1)
+      (name "CS")
+      (class "Default")
+      (node
+        (ref "J1")
+        (pin "2")
+        (pintype "BIDIRECTIONAL"))
+      (node
+        (ref "J2")
+        (pin "1")
+        (pintype "PASSIVE"))
+      (node
+        (ref "R3")
+        (pin "2")
+        (pintype "PASSIVE")))
+    (net
+      (code 2)
+      (name "DAT1")
+      (class "Default")
+      (node
+        (ref "J1")
+        (pin "8")
+        (pintype "BIDIRECTIONAL"))
+      (node
+        (ref "R2")
+        (pin "2")
+        (pintype "PASSIVE")))
+    (net
+      (code 3)
+      (name "DAT2")
+      (class "Default")
+      (node
+        (ref "J1")
+        (pin "1")
+        (pintype "BIDIRECTIONAL"))
+      (node
+        (ref "R1")
+        (pin "2")
+        (pintype "PASSIVE")))
+    (net
+      (code 4)
+      (name "GND")
+      (class "Default")
+      (node
+        (ref "C1")
+        (pin "2")
+        (pintype "PASSIVE"))
+      (node
+        (ref "J1")
+        (pin "6")
+        (pintype "POWER-IN"))
+      (node
+        (ref "J1")
+        (pin "SH")
+        (pintype "PASSIVE"))
+      (node
+        (ref "J2")
+        (pin "5")
+        (pintype "PASSIVE")))
+    (net
+      (code 5)
+      (name "MISO")
+      (class "Default")
+      (node
+        (ref "J1")
+        (pin "7")
+        (pintype "BIDIRECTIONAL"))
+      (node
+        (ref "J2")
+        (pin "6")
+        (pintype "PASSIVE"))
+      (node
+        (ref "R4")
+        (pin "2")
+        (pintype "PASSIVE")))
+    (net
+      (code 6)
+      (name "MOSI")
+      (class "Default")
+      (node
+        (ref "J1")
+        (pin "3")
+        (pintype "INPUT"))
+      (node
+        (ref "J2")
+        (pin "2")
+        (pintype "PASSIVE")))
+    (net
+      (code 7)
+      (name "SCK")
+      (class "Default")
+      (node
+        (ref "J1")
+        (pin "5")
+        (pintype "INPUT"))
+      (node
+        (ref "J2")
+        (pin "4")
+        (pintype "PASSIVE")))
+    (net
+      (code 8)
+      (name "VDD")
+      (class "Default")
+      (node
+        (ref "C1")
+        (pin "1")
+        (pintype "PASSIVE"))
+      (node
+        (ref "J1")
+        (pin "4")
+        (pintype "POWER-IN"))
+      (node
+        (ref "J2")
+        (pin "3")
+        (pintype "PASSIVE"))
+      (node
+        (ref "R1")
+        (pin "1")
+        (pintype "PASSIVE"))
+      (node
+        (ref "R2")
+        (pin "1")
+        (pintype "PASSIVE"))
+      (node
+        (ref "R3")
+        (pin "1")
+        (pintype "PASSIVE"))
+      (node
+        (ref "R4")
+        (pin "1")
+        (pintype "PASSIVE")))))
