@@ -1,40 +1,67 @@
-# Crossing Analyzer
+# PCB Crossing Optimizer
 
 Multi-layer crossing minimization for PCB connector pin assignment. Detects trace crossings in SKiDL-generated KiCad netlists and computes optimal pin orderings for single-layer routing using Sugiyama-style barycenter sweep.
 
 ## Installation
 
 ```
-pip install -e .
+pip install pcb-crossing-optimizer
 ```
 
-After installation, the `crossing-analyzer` command is available on your PATH.
+After installation, the `pcb-crossing-optimizer` command is available on your PATH.
 
 ## Usage
 
+The tool has two subcommands: `analyze` (default) and `plan-footprint`.
+
+### analyze (default)
+
+Analyze crossings between component layers. This is the original behavior and remains the default when no subcommand is given.
+
 ```
-crossing-analyzer <netlist.net> --layers "L0_refs | L1_refs | L2_refs" --reorderable REF [REF ...] [--exclude REF:PIN ...] [--json] [--quiet]
+pcb-crossing-optimizer [analyze] <netlist.net> --layers "L0_refs | L1_refs | L2_refs" --reorderable REF [REF ...] [--exclude REF:PIN ...] [--json] [--quiet]
 ```
 
 Analyze the microSD breakout with passives in the middle layer:
 ```
-crossing-analyzer examples/microsd_breakout.net --layers "J1 | R1,R2,C1 | J2" --reorderable J2 --exclude J1:SH
+pcb-crossing-optimizer examples/microsd_breakout.net --layers "J1 | R1,R2,C1 | J2" --reorderable J2 --exclude J1:SH
 ```
 
 Simple two-connector case (just use two layers):
 ```
-crossing-analyzer examples/i2c_breakout.net --layers "J1 | J2" --reorderable J2
+pcb-crossing-optimizer examples/i2c_breakout.net --layers "J1 | J2" --reorderable J2
 ```
 
 JSON output for tooling integration:
 ```
-crossing-analyzer examples/i2c_breakout.net --layers "J1 | J2" --reorderable J2 --json
+pcb-crossing-optimizer examples/i2c_breakout.net --layers "J1 | J2" --reorderable J2 --json
 ```
 
 Quiet mode for CI (exit code 0 = no crossings, 1 = crossings remain):
 ```
-crossing-analyzer examples/i2c_breakout.net --layers "J1 | J2" --reorderable J2 --quiet
+pcb-crossing-optimizer examples/i2c_breakout.net --layers "J1 | J2" --reorderable J2 --quiet
 ```
+
+### plan-footprint
+
+Compute an optimal pin map for a custom footprint. Given a target component (whose footprint you are designing), fixed anchor components, and optional pin locks, it runs the crossing sweep and produces a complete pin-to-net assignment proposal.
+
+```
+pcb-crossing-optimizer plan-footprint <netlist.net> \
+    --target J1 \
+    --anchors "J2,U1 | R1,R2,R3,C1" \
+    --lock 1=NC 2=NC 3=GND_EARLY_A \
+    --unmatched end \
+    --exclude-nets GND \
+    [--json] [--quiet]
+```
+
+Options:
+- `--target REF`: Component whose footprint is being designed
+- `--anchors "..."`: Fixed components organized in layers separated by `|`
+- `--lock PIN=NET`: Lock specific pins to nets (use `PIN=NC` for no-connect)
+- `--unmatched start|end|split`: Where to place pins with no anchor connections (default: `end`)
+- `--exclude-nets NET [NET ...]`: Nets to exclude from analysis (e.g. ground pours)
 
 Nets spanning non-adjacent layers (e.g., J1 to J2 through a passive layer)
 are handled automatically via virtual pass-through nodes.
@@ -69,3 +96,11 @@ pytest -v
 - Passive placement optimizer (assign positions to resistors/caps in routing channel)
 - F.Cu/B.Cu layer assignment for unavoidable crossings
 - Migration to skidl-vscode extension (core/crossing.py + MCP tool + VS Code command)
+
+## Python import
+
+The PyPI package name is `pcb-crossing-optimizer`, but the importable module is `crossing_analyzer`:
+
+```python
+from crossing_analyzer import sweep_optimize, PinColumn, format_multilayer_report
+```

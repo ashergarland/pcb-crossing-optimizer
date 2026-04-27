@@ -20,6 +20,13 @@ from crossing_analyzer import (
     _format_pin_ref,
     parse_netlist,
     infer_pin_order,
+    PinAssignment,
+    FootprintPlan,
+    parse_pin_locks,
+    build_pin_map,
+    plan_footprint,
+    format_footprint_plan,
+    plan_to_dict,
 )
 
 
@@ -532,3 +539,272 @@ def test_cli_quiet_exit_code_one():
     result = _run_cli(netlist, "--layers", "J1 | R1,R2,C1 | J2", "--reorderable", "J2", "--exclude", "J1:SH", "--quiet")
     assert result.stdout.strip() == ""
     assert result.returncode == 1
+
+
+# =========================================================================
+# parse_pin_locks tests
+# =========================================================================
+
+def test_parse_pin_locks_basic():
+    """Parse simple PIN=NET locks."""
+    locks = parse_pin_locks(["1=NC", "3=GND_EARLY_A", "4=GND_EARLY_B"])
+    assert locks == {"1": None, "3": "GND_EARLY_A", "4": "GND_EARLY_B"}
+
+
+def test_parse_pin_locks_empty():
+    """Empty list returns empty dict."""
+    assert parse_pin_locks([]) == {}
+
+
+def test_parse_pin_locks_nc_case_insensitive():
+    """NC detection is case-insensitive."""
+    locks = parse_pin_locks(["1=nc", "2=Nc"])
+    assert locks["1"] is None
+    assert locks["2"] is None
+
+
+def test_parse_pin_locks_invalid():
+    """Invalid format raises ValueError."""
+    import pytest
+    with pytest.raises(ValueError, match="Invalid --lock format"):
+        parse_pin_locks(["bad"])
+
+
+def test_parse_pin_locks_empty_pin():
+    """Empty pin raises ValueError."""
+    import pytest
+    with pytest.raises(ValueError, match="Empty pin"):
+        parse_pin_locks(["=NET"])
+
+
+# =========================================================================
+# build_pin_map tests
+# =========================================================================
+
+def test_build_pin_map_basic():
+    """build_pin_map merges locked, optimized, and unmatched pins."""
+    all_pins = ["1", "2", "3", "4", "5"]
+    locks = {"1": None, "5": None}  # NC
+    optimized_signal = ["3", "4"]   # two signal pins in sweep order
+    pin_to_net = {"3": "NET_A", "4": "NET_B"}
+    nets = {"NET_A": [("J1", "3"), ("J2", "1")], "NET_B": [("J1", "4"), ("J2", "2")]}
+
+    result = build_pin_map(
+        target_ref="J1",
+        all_pins=all_pins,
+        locks=locks,
+        optimized_signal_pins=optimized_signal,
+        pin_to_net=pin_to_net,
+        nets=nets,
+        unmatched_mode="end",
+    )
+
+    assert len(result) == 5
+    assert result[0].status == "locked"
+    assert result[0].net is None  # NC
+    assert result[4].status == "locked"
+    # Positions 1-3 (indices 1-3): 2 optimized + 1 unmatched
+    statuses = [a.status for a in result]
+    assert statuses.count("locked") == 2
+    assert statuses.count("optimized") == 2
+    assert statuses.count("unmatched") == 1
+
+
+def test_build_pin_map_unmatched_start():
+    """unmatched_mode='start' places unmatched pins before signal pins."""
+    all_pins = ["1", "2", "3", "4"]
+    locks = {}
+    optimized_signal = ["2"]
+    pin_to_net = {"2": "NET_A"}
+    nets = {"NET_A": [("J1", "2"), ("J2", "1")]}
+
+    result = build_pin_map(
+        target_ref="J1",
+        all_pins=all_pins,
+        locks=locks,
+        optimized_signal_pins=optimized_signal,
+        pin_to_net=pin_to_net,
+        nets=nets,
+        unmatched_mode="start",
+    )
+
+    # With 4 pins, 0 locked, 1 optimized, 3 unmatched
+    # start mode: unmatched first, then optimized
+    statuses = [a.status for a in result]
+    assert statuses[:3] == ["unmatched", "unmatched", "unmatched"]
+    assert statuses[3] == "optimized"
+
+
+# =========================================================================
+# plan_footprint unit tests
+# =========================================================================
+
+def test_plan_footprint_simple():
+    """plan_footprint with a simple 2-layer topology returns a FootprintPlan."""
+    # Minimal nets: J2 pin 1 -> NET_A, J2 pin 2 -> NET_B
+    # Target J1 with 4 pins: want to find optimal pin assignment
+    nets = {
+        "NET_A": [("J2", "1"), ("J1", "1")],
+        "NET_B": [("J2", "2"), ("J1", "2")],
+    }
+    anchor_layers = [[PinColumn(ref="J2", pin_order=["1", "2"])]]
+    locks = {"3": None, "4": None}
+
+    plan = plan_footprint(
+        target_ref="J1",
+        target_pins=["1", "2", "3", "4"],
+        anchor_layers=anchor_layers,
+        nets=nets,
+        locks=locks,
+        unmatched="end",
+    )
+
+    assert isinstance(plan, FootprintPlan)
+    assert plan.target_ref == "J1"
+    assert len(plan.pin_map) == 4
+    assert plan.crossings_after == 0  # trivial case, no crossings
+
+
+def test_plan_footprint_excludes_nets():
+    """plan_footprint excludes specified nets from analysis."""
+    nets = {
+        "GND": [("J2", "1"), ("J1", "1"), ("C1", "2")],
+        "NET_A": [("J2", "2"), ("J1", "2")],
+    }
+    anchor_layers = [[PinColumn(ref="J2", pin_order=["1", "2"])]]
+
+    plan = plan_footprint(
+        target_ref="J1",
+        target_pins=["1", "2"],
+        anchor_layers=anchor_layers,
+        nets=nets,
+        locks={},
+        exclude_nets={"GND"},
+    )
+
+    # GND should not appear in the signal optimization
+    signal_nets = [a.net for a in plan.pin_map if a.status == "optimized"]
+    assert "GND" not in signal_nets
+
+
+# =========================================================================
+# format_footprint_plan / plan_to_dict tests
+# =========================================================================
+
+def test_format_footprint_plan_output():
+    """format_footprint_plan produces human-readable output."""
+    plan = FootprintPlan(
+        target_ref="J1",
+        pin_map=[
+            PinAssignment(pin="1", net=None, status="locked"),
+            PinAssignment(pin="2", net="NET_A", status="optimized", routes_to="J2.1"),
+            PinAssignment(pin="3", net=None, status="unmatched"),
+        ],
+        crossings_before=2,
+        crossings_after=0,
+        iterations=3,
+        passive_reorderings={},
+    )
+    text = format_footprint_plan(plan)
+    assert "J1" in text
+    assert "Locked pins" in text
+    assert "Optimized signal assignment" in text
+    assert "Unmatched pins" in text
+    assert "2 before -> 0 after" in text
+
+
+def test_plan_to_dict_structure():
+    """plan_to_dict produces expected JSON structure."""
+    plan = FootprintPlan(
+        target_ref="J1",
+        pin_map=[
+            PinAssignment(pin="1", net=None, status="locked"),
+            PinAssignment(pin="2", net="NET_A", status="optimized", routes_to="J2.1"),
+        ],
+        crossings_before=1,
+        crossings_after=0,
+        iterations=2,
+        passive_reorderings={"R1": ["2", "1"]},
+    )
+    d = plan_to_dict(plan)
+    assert d["target"] == "J1"
+    assert d["total_pins"] == 2
+    assert d["crossings_before"] == 1
+    assert d["crossings_after"] == 0
+    assert len(d["pin_map"]) == 2
+    assert d["pin_map"][0]["status"] == "locked"
+    assert d["pin_map"][1]["routes_to"] == "J2.1"
+    assert d["passive_reorderings"]["R1"] == ["2", "1"]
+
+
+# =========================================================================
+# plan-footprint CLI tests
+# =========================================================================
+
+def test_cli_plan_footprint_json():
+    """plan-footprint --json produces valid JSON."""
+    netlist = str(Path(__file__).resolve().parent.parent / "examples" / "microsd_breakout.net")
+    if not Path(netlist).exists():
+        return
+    result = _run_cli(
+        "plan-footprint", netlist,
+        "--target", "J1",
+        "--anchors", "J2",
+        "--lock", "1=NC",
+        "--exclude-nets", "GND",
+        "--json",
+    )
+    assert result.returncode in (0, 1)  # may or may not have crossings
+    import json
+    data = json.loads(result.stdout)
+    assert "target" in data
+    assert "pin_map" in data
+    assert data["target"] == "J1"
+
+
+def test_cli_plan_footprint_text():
+    """plan-footprint without --json produces readable text."""
+    netlist = str(Path(__file__).resolve().parent.parent / "examples" / "microsd_breakout.net")
+    if not Path(netlist).exists():
+        return
+    result = _run_cli(
+        "plan-footprint", netlist,
+        "--target", "J1",
+        "--anchors", "J2",
+        "--lock", "1=NC",
+        "--exclude-nets", "GND",
+    )
+    assert result.returncode in (0, 1)
+    assert "Footprint Pin Map Proposal" in result.stdout
+
+
+def test_cli_plan_footprint_quiet():
+    """plan-footprint --quiet suppresses output."""
+    netlist = str(Path(__file__).resolve().parent.parent / "examples" / "microsd_breakout.net")
+    if not Path(netlist).exists():
+        return
+    result = _run_cli(
+        "plan-footprint", netlist,
+        "--target", "J1",
+        "--anchors", "J2",
+        "--exclude-nets", "GND",
+        "--quiet",
+    )
+    assert result.stdout.strip() == ""
+    assert result.returncode in (0, 1)
+
+
+def test_cli_analyze_explicit_subcommand():
+    """Explicit 'analyze' subcommand works."""
+    netlist = str(Path(__file__).resolve().parent.parent / "examples" / "i2c_breakout.net")
+    if not Path(netlist).exists():
+        return
+    result = _run_cli(
+        "analyze", netlist,
+        "--layers", "J1 | J2",
+        "--reorderable", "J2",
+        "--json",
+    )
+    import json
+    data = json.loads(result.stdout)
+    assert "total_crossings_before" in data

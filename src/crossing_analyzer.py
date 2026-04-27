@@ -82,6 +82,26 @@ class MultilayerReport:
     iterations: int
 
 
+@dataclass
+class PinAssignment:
+    """A single pin's assignment in a footprint plan."""
+    pin: str
+    net: Optional[str]   # None = NC
+    status: str          # "locked" | "optimized" | "unmatched"
+    routes_to: Optional[str] = None  # e.g. "J2.1" for optimized pins
+
+
+@dataclass
+class FootprintPlan:
+    """Result of a plan-footprint analysis."""
+    target_ref: str
+    pin_map: list[PinAssignment]
+    crossings_before: int
+    crossings_after: int
+    iterations: int
+    passive_reorderings: dict[str, list[str]]
+
+
 # =========================================================================
 # Formatting helpers
 # =========================================================================
@@ -732,47 +752,316 @@ def report_to_dict(
 
 
 # =========================================================================
+# Footprint planning
+# =========================================================================
+
+def parse_pin_locks(lock_args: list[str]) -> dict[str, str | None]:
+    """Parse --lock arguments into a pin-to-net mapping.
+
+    Each arg is 'PIN=NET' or 'PIN=NC'.
+    Returns dict mapping pin ID to net name (or None for NC).
+    """
+    locks: dict[str, str | None] = {}
+    for arg in lock_args:
+        if "=" not in arg:
+            raise ValueError(
+                f"Invalid --lock format: '{arg}'. Expected PIN=NET or PIN=NC."
+            )
+        pin, net = arg.split("=", 1)
+        pin = pin.strip()
+        net = net.strip()
+        if not pin:
+            raise ValueError(f"Empty pin in --lock: '{arg}'")
+        if net.upper() == "NC":
+            locks[pin] = None
+        else:
+            locks[pin] = net
+    return locks
+
+
+def _find_primary_route(
+    target_ref: str,
+    target_pin: str,
+    net_name: str,
+    nets: dict[str, list[tuple[str, str]]],
+) -> str | None:
+    """Find the primary non-target endpoint for a net (for 'routes to' display)."""
+    nodes = nets.get(net_name, [])
+    for ref, pin in nodes:
+        if ref != target_ref and not ref.startswith("TP"):
+            return f"{ref}.{pin}"
+    return None
+
+
+def build_pin_map(
+    target_ref: str,
+    all_pins: list[str],
+    locks: dict[str, str | None],
+    optimized_signal_pins: list[str],
+    pin_to_net: dict[str, str],
+    nets: dict[str, list[tuple[str, str]]],
+    unmatched_mode: str,
+) -> list[PinAssignment]:
+    """Build the final pin map by merging locked, optimized, and unmatched pins.
+
+    Args:
+        target_ref: Component ref (for routes_to lookup).
+        all_pins: All pin IDs in physical position order.
+        locks: Pin-to-net locks from --lock (None = NC).
+        optimized_signal_pins: Pin IDs in sweep-optimized order (signal pins only).
+        pin_to_net: Mapping of pin ID to net name (from netlist).
+        nets: Full net connectivity for routes_to lookup.
+        unmatched_mode: 'start', 'end', or 'split'.
+
+    Returns:
+        List of PinAssignment in physical position order.
+    """
+    # Categorize pins
+    locked_pins = set(locks.keys())
+    signal_pins = set(optimized_signal_pins)
+    unmatched_pins = [
+        p for p in all_pins
+        if p not in locked_pins and p not in signal_pins
+    ]
+
+    # Build the assignment slots
+    n = len(all_pins)
+    result: list[PinAssignment | None] = [None] * n
+    pin_to_idx = {p: i for i, p in enumerate(all_pins)}
+
+    # 1. Place locked pins at their positions
+    for pin, net in locks.items():
+        if pin in pin_to_idx:
+            idx = pin_to_idx[pin]
+            result[idx] = PinAssignment(
+                pin=pin, net=net, status="locked",
+                routes_to=_find_primary_route(target_ref, pin, net, nets) if net else None,
+            )
+
+    # 2. Collect open slots (not locked)
+    open_slots = [i for i in range(n) if result[i] is None]
+
+    # 3. Place unmatched pins per mode, filling from the open slots
+    if unmatched_mode == "start":
+        unmatched_slots = open_slots[:len(unmatched_pins)]
+        signal_slots = open_slots[len(unmatched_pins):]
+    elif unmatched_mode == "split":
+        half = len(unmatched_pins) // 2
+        unmatched_start = unmatched_pins[:half]
+        unmatched_end = unmatched_pins[half:]
+        signal_slot_count = len(open_slots) - len(unmatched_pins)
+        unmatched_slots = open_slots[:len(unmatched_start)] + open_slots[len(unmatched_start) + signal_slot_count:]
+        signal_slots = open_slots[len(unmatched_start):len(unmatched_start) + signal_slot_count]
+        # Rebuild unmatched_pins to match the split order
+        unmatched_pins = unmatched_start + unmatched_end
+    else:  # "end" (default)
+        signal_slots = open_slots[:len(optimized_signal_pins)]
+        unmatched_slots = open_slots[len(optimized_signal_pins):]
+
+    # 4. Place optimized signal pins in sweep order
+    for sig_pin, slot_idx in zip(optimized_signal_pins, signal_slots):
+        net = pin_to_net.get(sig_pin)
+        result[slot_idx] = PinAssignment(
+            pin=all_pins[slot_idx], net=net, status="optimized",
+            routes_to=_find_primary_route(target_ref, sig_pin, net, nets) if net else None,
+        )
+
+    # 5. Place unmatched pins
+    for um_pin, slot_idx in zip(unmatched_pins, unmatched_slots):
+        net = pin_to_net.get(um_pin)
+        result[slot_idx] = PinAssignment(
+            pin=all_pins[slot_idx], net=net, status="unmatched",
+            routes_to=None,
+        )
+
+    # Fill any remaining Nones (shouldn't happen but defensive)
+    for i in range(n):
+        if result[i] is None:
+            result[i] = PinAssignment(pin=all_pins[i], net=None, status="unmatched")
+
+    return result
+
+
+def plan_footprint(
+    target_ref: str,
+    target_pins: list[str],
+    anchor_layers: list[list[PinColumn]],
+    nets: dict[str, list[tuple[str, str]]],
+    locks: dict[str, str | None],
+    unmatched: str = "end",
+    exclude_nets: set[str] | None = None,
+) -> FootprintPlan:
+    """Compute an optimal pin map for a custom footprint.
+
+    Args:
+        target_ref: Ref of the component being designed.
+        target_pins: All pin IDs in physical position order.
+        anchor_layers: Fixed components organized in layers (outermost first).
+        nets: Parsed netlist connectivity.
+        locks: Pin-to-net locks (from parse_pin_locks).
+        unmatched: Placement mode for unconnected pins.
+        exclude_nets: Net names to exclude from analysis.
+
+    Returns:
+        FootprintPlan with complete pin map proposal.
+    """
+    exclude = exclude_nets or set()
+
+    # Filter nets
+    filtered_nets = {
+        name: nodes for name, nodes in nets.items()
+        if name not in exclude
+    }
+
+    # Build pin-to-net mapping for the target component
+    pin_to_net: dict[str, str] = {}
+    for net_name, nodes in filtered_nets.items():
+        for ref, pin in nodes:
+            if ref == target_ref:
+                pin_to_net[pin] = net_name
+
+    # Identify locked, signal, and unmatched pins
+    locked_pins = set(locks.keys())
+    signal_pins = [
+        p for p in target_pins
+        if p not in locked_pins and p in pin_to_net
+    ]
+    # Unmatched: not locked and not connected to any analyzed net
+    # (will be placed by build_pin_map)
+
+    # Build layers for sweep: anchor_layers + [target with signal pins only]
+    # Detect passives: 2-pin components in anchor layers are reorderable
+    reorderable_refs = {target_ref}
+    for layer in anchor_layers:
+        for comp in layer:
+            if len(comp.pin_order) == 2:
+                reorderable_refs.add(comp.ref)
+
+    target_column = PinColumn(ref=target_ref, pin_order=list(signal_pins))
+    all_layers = list(anchor_layers) + [[target_column]]
+
+    # Run sweep
+    report = sweep_optimize(all_layers, reorderable_refs, filtered_nets)
+
+    # Extract optimized signal pin order from sweep result
+    optimized_signal_order = report.optimized_orders.get(target_ref, signal_pins)
+
+    # Collect passive reorderings
+    passive_reorderings: dict[str, list[str]] = {}
+    for ref, order in report.optimized_orders.items():
+        if ref != target_ref and order != report.original_orders.get(ref):
+            passive_reorderings[ref] = order
+
+    # Build final pin map
+    pin_map = build_pin_map(
+        target_ref=target_ref,
+        all_pins=target_pins,
+        locks=locks,
+        optimized_signal_pins=optimized_signal_order,
+        pin_to_net=pin_to_net,
+        nets=filtered_nets,
+        unmatched_mode=unmatched,
+    )
+
+    return FootprintPlan(
+        target_ref=target_ref,
+        pin_map=pin_map,
+        crossings_before=report.total_crossings,
+        crossings_after=report.total_crossings_after,
+        iterations=report.iterations,
+        passive_reorderings=passive_reorderings,
+    )
+
+
+def format_footprint_plan(plan: FootprintPlan) -> str:
+    """Format a FootprintPlan as human-readable text."""
+    lines: list[str] = []
+    total = len(plan.pin_map)
+    lines.append(f"Footprint Pin Map Proposal for {plan.target_ref} ({total} positions)")
+    lines.append("=" * 60)
+    lines.append("")
+
+    # Group by status
+    locked = [a for a in plan.pin_map if a.status == "locked"]
+    optimized = [a for a in plan.pin_map if a.status == "optimized"]
+    unmatched = [a for a in plan.pin_map if a.status == "unmatched"]
+
+    if locked:
+        lines.append("Locked pins:")
+        for a in locked:
+            net_str = a.net if a.net else "NC"
+            lines.append(f"  {a.pin:>3}: {net_str}")
+        lines.append("")
+
+    if optimized:
+        lines.append("Optimized signal assignment:")
+        for a in optimized:
+            net_str = a.net if a.net else "NC"
+            route = f"  (routes to {a.routes_to})" if a.routes_to else ""
+            lines.append(f"  {a.pin:>3}: {net_str:<20}{route}")
+        lines.append("")
+
+    if unmatched:
+        lines.append("Unmatched pins:")
+        for a in unmatched:
+            net_str = a.net if a.net else "NC"
+            lines.append(f"  {a.pin:>3}: {net_str}")
+        lines.append("")
+
+    if plan.passive_reorderings:
+        lines.append("Passive reorderings:")
+        for ref in sorted(plan.passive_reorderings):
+            order = ", ".join(plan.passive_reorderings[ref])
+            lines.append(f"  {ref}: [{order}]")
+        lines.append("")
+
+    lines.append(
+        f"Crossings: {plan.crossings_before} before -> "
+        f"{plan.crossings_after} after ({plan.iterations} iterations)"
+    )
+
+    if plan.crossings_after > 0:
+        lines.append("")
+        lines.append(
+            "WARNING: Not all crossings can be eliminated by reordering alone."
+        )
+        lines.append(
+            "Remaining crossings will require vias or a second routing layer."
+        )
+
+    return "\n".join(lines)
+
+
+def plan_to_dict(plan: FootprintPlan) -> dict:
+    """Convert a FootprintPlan to a JSON-serializable dict."""
+    pin_map = []
+    for a in plan.pin_map:
+        entry: dict = {
+            "pin": a.pin,
+            "net": a.net,
+            "status": a.status,
+        }
+        if a.routes_to:
+            entry["routes_to"] = a.routes_to
+        pin_map.append(entry)
+
+    return {
+        "target": plan.target_ref,
+        "total_pins": len(plan.pin_map),
+        "crossings_before": plan.crossings_before,
+        "crossings_after": plan.crossings_after,
+        "iterations": plan.iterations,
+        "pin_map": pin_map,
+        "passive_reorderings": plan.passive_reorderings,
+    }
+
+
+# =========================================================================
 # CLI entry point
 # =========================================================================
 
-def main():
-    import argparse
-
-    parser = argparse.ArgumentParser(
-        description="Analyze trace crossings in a KiCad netlist.",
-        epilog=(
-            "Example: crossing_analyzer.py net.net "
-            "--layers 'J1 | R1,C1 | J2' --reorderable J2"
-        ),
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    parser.add_argument("netlist", help="Path to a KiCad .net file generated by SKiDL")
-    parser.add_argument(
-        "--layers", type=str, required=True,
-        help=(
-            "Layer specification: components per layer separated by |. "
-            "Multiple components in a layer separated by commas. "
-            "Example: 'J1 | R1,R2,C1 | J2'"
-        ),
-    )
-    parser.add_argument(
-        "--reorderable", nargs="*", default=[], metavar="REF",
-        help="Components whose pin order can be changed.",
-    )
-    parser.add_argument(
-        "--exclude", nargs="*", default=[], metavar="REF:PIN",
-        help="Exclude pins from analysis (e.g. J1:SH).",
-    )
-    parser.add_argument(
-        "--json", action="store_true", dest="json_output",
-        help="Output results as JSON instead of human-readable text.",
-    )
-    parser.add_argument(
-        "--quiet", "-q", action="store_true",
-        help="Suppress all output; exit code 0 = no crossings, 1 = crossings remain.",
-    )
-    args = parser.parse_args()
-
+def _cmd_analyze(args):
+    """Handle the 'analyze' subcommand (original behavior)."""
     if not Path(args.netlist).exists():
         print(f"Error: file not found: {args.netlist}")
         sys.exit(1)
@@ -845,6 +1134,199 @@ def main():
         print(format_multilayer_report(report, data["nets"]))
 
     sys.exit(0 if report.total_crossings_after == 0 else 1)
+
+
+def _cmd_plan_footprint(args):
+    """Handle the 'plan-footprint' subcommand."""
+    if not Path(args.netlist).exists():
+        print(f"Error: file not found: {args.netlist}")
+        sys.exit(1)
+
+    data = parse_netlist(args.netlist)
+
+    # Validate target component
+    if args.target not in data["components"]:
+        print(f"Error: target component '{args.target}' not found in netlist.")
+        print(f"Available: {', '.join(sorted(data['components'].keys()))}")
+        sys.exit(1)
+
+    # Parse --anchors: "J2,U1 | R1,R2,C1"
+    anchor_layers: list[list[PinColumn]] = []
+    for group_str in args.anchors.split("|"):
+        layer: list[PinColumn] = []
+        for ref in group_str.split(","):
+            ref = ref.strip()
+            if not ref:
+                continue
+            if ref not in data["components"]:
+                print(f"Error: anchor component '{ref}' not found in netlist.")
+                print(f"Available: {', '.join(sorted(data['components'].keys()))}")
+                sys.exit(1)
+            pins = infer_pin_order(ref, data["nets"])
+            layer.append(PinColumn(ref=ref, pin_order=pins))
+        if layer:
+            anchor_layers.append(layer)
+
+    # Parse locks
+    try:
+        locks = parse_pin_locks(args.lock or [])
+    except ValueError as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+
+    # Infer target pin count from component or default to max pin in netlist
+    target_pins = infer_pin_order(args.target, data["nets"])
+    # Include locked pins that may not appear in the netlist (e.g. NC pins)
+    for pin in locks:
+        if pin not in target_pins:
+            target_pins.append(pin)
+    # Re-sort
+    def _sort_key(p: str):
+        try:
+            return (0, int(p))
+        except ValueError:
+            return (1, p)
+    target_pins.sort(key=_sort_key)
+
+    exclude_nets = set(args.exclude_nets or [])
+    verbose = not args.quiet and not args.json_output
+
+    if verbose:
+        print(f"Planning footprint for {args.target} ({len(target_pins)} pins)")
+        print(f"Anchor layers: {args.anchors}")
+        if locks:
+            locked_str = ", ".join(
+                f"{p}={'NC' if n is None else n}"
+                for p, n in sorted(locks.items(), key=lambda x: _sort_key(x[0]))
+            )
+            print(f"Locked pins: {locked_str}")
+        if exclude_nets:
+            print(f"Excluded nets: {', '.join(sorted(exclude_nets))}")
+        print()
+
+    plan = plan_footprint(
+        target_ref=args.target,
+        target_pins=target_pins,
+        anchor_layers=anchor_layers,
+        nets=data["nets"],
+        locks=locks,
+        unmatched=args.unmatched,
+        exclude_nets=exclude_nets,
+    )
+
+    if args.json_output:
+        print(json.dumps(plan_to_dict(plan), indent=2))
+    elif not args.quiet:
+        print(format_footprint_plan(plan))
+
+    sys.exit(0 if plan.crossings_after == 0 else 1)
+
+
+def main():
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Analyze trace crossings in a KiCad netlist.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    subparsers = parser.add_subparsers(dest="command")
+
+    # --- analyze subcommand (default) ---
+    analyze = subparsers.add_parser(
+        "analyze",
+        help="Analyze crossings between component layers.",
+        epilog=(
+            "Example: crossing-analyzer analyze net.net "
+            "--layers 'J1 | R1,C1 | J2' --reorderable J2"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    analyze.add_argument("netlist", help="Path to a KiCad .net file generated by SKiDL")
+    analyze.add_argument(
+        "--layers", type=str, required=True,
+        help=(
+            "Layer specification: components per layer separated by |. "
+            "Multiple components in a layer separated by commas. "
+            "Example: 'J1 | R1,R2,C1 | J2'"
+        ),
+    )
+    analyze.add_argument(
+        "--reorderable", nargs="*", default=[], metavar="REF",
+        help="Components whose pin order can be changed.",
+    )
+    analyze.add_argument(
+        "--exclude", nargs="*", default=[], metavar="REF:PIN",
+        help="Exclude pins from analysis (e.g. J1:SH).",
+    )
+    analyze.add_argument(
+        "--json", action="store_true", dest="json_output",
+        help="Output results as JSON instead of human-readable text.",
+    )
+    analyze.add_argument(
+        "--quiet", "-q", action="store_true",
+        help="Suppress all output; exit code 0 = no crossings, 1 = crossings remain.",
+    )
+    analyze.set_defaults(func=_cmd_analyze)
+
+    # --- plan-footprint subcommand ---
+    plan = subparsers.add_parser(
+        "plan-footprint",
+        help="Compute an optimal pin map for a custom footprint.",
+        epilog=(
+            "Example: crossing-analyzer plan-footprint net.net "
+            "--target J1 --anchors 'J2,U1 | R1,R2,C1' "
+            "--lock 1=NC 2=NC 3=GND_EARLY_A"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    plan.add_argument("netlist", help="Path to a KiCad .net file generated by SKiDL")
+    plan.add_argument(
+        "--target", required=True, metavar="REF",
+        help="Component ref whose footprint is being designed.",
+    )
+    plan.add_argument(
+        "--anchors", required=True,
+        help=(
+            "Fixed components organized in layers separated by |. "
+            "Example: 'J2,U1 | R1,R2,R3,C1'"
+        ),
+    )
+    plan.add_argument(
+        "--lock", nargs="*", default=[], metavar="PIN=NET",
+        help="Lock pins to specific nets. Use PIN=NC for no-connect. Example: 1=NC 3=GND_EARLY_A",
+    )
+    plan.add_argument(
+        "--unmatched", choices=["start", "end", "split"], default="end",
+        help="Where to place unmatched pins: start, end (default), or split.",
+    )
+    plan.add_argument(
+        "--exclude-nets", nargs="*", default=[], metavar="NET",
+        help="Net names to exclude from analysis (e.g. GND).",
+    )
+    plan.add_argument(
+        "--json", action="store_true", dest="json_output",
+        help="Output results as JSON instead of human-readable text.",
+    )
+    plan.add_argument(
+        "--quiet", "-q", action="store_true",
+        help="Suppress all output; exit code 0 = no crossings, 1 = crossings remain.",
+    )
+    plan.set_defaults(func=_cmd_plan_footprint)
+
+    # Backward compatibility: if first arg is not a known subcommand,
+    # assume "analyze" mode (legacy CLI: crossing-analyzer file.net --layers ...)
+    known_commands = {"analyze", "plan-footprint", "-h", "--help"}
+    argv = sys.argv[1:]
+    if argv and argv[0] not in known_commands:
+        argv = ["analyze"] + argv
+
+    args = parser.parse_args(argv)
+
+    if args.command is None:
+        parser.print_help()
+        sys.exit(0)
+
+    args.func(args)
 
 
 if __name__ == "__main__":
