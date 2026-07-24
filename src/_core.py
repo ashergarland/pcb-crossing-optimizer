@@ -582,19 +582,21 @@ def parse_netlist(filepath: str) -> dict:
 
     components: dict[str, dict] = {}
     for comp in _find_nodes(tree, "comp"):
-        ref = value = part = None
+        ref = value = part = footprint = None
         for item in comp:
             if isinstance(item, tuple):
                 if item[0] == "ref" and len(item) > 1:
                     ref = item[1]
                 elif item[0] == "value" and len(item) > 1:
                     value = item[1]
+                elif item[0] == "footprint" and len(item) > 1:
+                    footprint = item[1]
                 elif item[0] == "libsource":
                     for sub in item:
                         if isinstance(sub, tuple) and sub[0] == "part" and len(sub) > 1:
                             part = sub[1]
         if ref:
-            components[ref] = {"value": value, "part": part}
+            components[ref] = {"value": value, "part": part, "footprint": footprint}
 
     nets: dict[str, list[tuple[str, str]]] = {}
     for net in _find_nodes(tree, "net"):
@@ -1222,8 +1224,102 @@ def _cmd_plan_footprint(args):
     sys.exit(0 if plan.crossings_after == 0 else 1)
 
 
+def _cmd_place(args):
+    """Handle the 'place' subcommand."""
+    from .board_constraints import BoardConstraints, FixedPosition
+    from .footprint_parser import FootprintGeometry, detect_footprint_dir, resolve_footprint_geometry
+    from .placement_engine import place_components, placement_to_dict
+    from .power_validator import validate_power_traces, power_validation_to_dict
+
+    if not Path(args.netlist).exists():
+        print(f"Error: file not found: {args.netlist}")
+        sys.exit(1)
+
+    data = parse_netlist(args.netlist)
+    nets = data["nets"]
+    components = data["components"]
+
+    # Parse board size
+    width_mm = None
+    height_mm = None
+    if args.board:
+        parts = args.board.lower().split("x")
+        if len(parts) == 2:
+            width_mm = float(parts[0])
+            height_mm = float(parts[1])
+
+    # Parse fixed positions
+    fixed_positions = []
+    for spec in args.fixed:
+        if ":" not in spec:
+            print(f"Error: --fixed must be REF:X,Y,ROT format, got '{spec}'")
+            sys.exit(1)
+        ref, coords = spec.split(":", 1)
+        coord_parts = coords.split(",")
+        x = float(coord_parts[0])
+        y = float(coord_parts[1]) if len(coord_parts) > 1 else 0.0
+        rot = float(coord_parts[2]) if len(coord_parts) > 2 else 0.0
+        fixed_positions.append(FixedPosition(ref=ref, x=x, y=y, rotation=rot))
+
+    # Parse current budget
+    current_budget = {}
+    for spec in args.current:
+        if ":" not in spec:
+            print(f"Error: --current must be NET:AMPS format, got '{spec}'")
+            sys.exit(1)
+        net, amps = spec.split(":", 1)
+        current_budget[net] = float(amps)
+
+    # Resolve footprint geometries
+    fp_dir = detect_footprint_dir()
+    geometries: dict[str, FootprintGeometry] = {}
+    for ref, info in components.items():
+        fp_str = info.get("footprint", "")
+        if fp_str and fp_dir:
+            geom = resolve_footprint_geometry(fp_str, fp_dir)
+            if geom:
+                geometries[ref] = geom
+                continue
+        # Fallback: estimate from component type
+        if ref.startswith("J") or ref.startswith("P"):
+            pin_count = len([1 for nodes in nets.values() for r, p in nodes if r == ref])
+            geometries[ref] = FootprintGeometry("Connector", ref, 2.54, max(pin_count * 2.54, 5.0))
+        elif ref.startswith("U"):
+            geometries[ref] = FootprintGeometry("IC", ref, 5.0, 5.0)
+        elif ref.startswith(("R", "C", "L")):
+            geometries[ref] = FootprintGeometry("Passive", ref, 2.0, 1.5)
+        else:
+            geometries[ref] = FootprintGeometry("Generic", ref, 3.0, 3.0)
+
+    constraints = BoardConstraints(
+        width_mm=width_mm,
+        height_mm=height_mm,
+        fixed_positions=fixed_positions,
+    )
+
+    result = place_components(
+        nets, components, geometries, constraints,
+        annealing_iterations=args.iterations,
+    )
+
+    output = placement_to_dict(result)
+
+    # Add power validation if budget provided
+    if current_budget:
+        violations = validate_power_traces(nets, current_budget)
+        output["power_violations"] = power_validation_to_dict(violations)
+
+    print(json.dumps(output, indent=2))
+    sys.exit(0 if result.metrics.overlap_count == 0 else 1)
+
+
 def main():
     import argparse
+
+    from .board_constraints import BoardConstraints, FixedPosition, parse_board_constraints
+    from .footprint_parser import FootprintGeometry, detect_footprint_dir, resolve_footprint_geometry
+    from .placement_engine import place_components, placement_to_dict
+    from .power_validator import validate_power_traces, power_validation_to_dict
 
     parser = argparse.ArgumentParser(
         description="Analyze trace crossings in a KiCad netlist.",
@@ -1313,9 +1409,42 @@ def main():
     )
     plan.set_defaults(func=_cmd_plan_footprint)
 
+    # --- place subcommand ---
+    place = subparsers.add_parser(
+        "place",
+        help="Compute optimal component placement for a PCB.",
+        epilog=(
+            "Example: pcb-crossing-optimizer place net.net "
+            "--board 50x30 --fixed 'J1:0,15,0' --json"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    place.add_argument("netlist", help="Path to a KiCad .net file generated by SKiDL")
+    place.add_argument(
+        "--board", type=str, default=None,
+        help="Board size as WxH in mm (e.g. '50x30'). Auto-sized if omitted.",
+    )
+    place.add_argument(
+        "--fixed", nargs="*", default=[], metavar="REF:X,Y,ROT",
+        help="Fix components at positions (e.g. 'J1:0,15,90').",
+    )
+    place.add_argument(
+        "--current", nargs="*", default=[], metavar="NET:AMPS",
+        help="Current budget per net for power validation (e.g. 'VCC:0.5 GND:1.0').",
+    )
+    place.add_argument(
+        "--iterations", type=int, default=10000,
+        help="Simulated annealing iterations (default: 10000).",
+    )
+    place.add_argument(
+        "--json", action="store_true", dest="json_output",
+        help="Output results as JSON (default and only format).",
+    )
+    place.set_defaults(func=_cmd_place)
+
     # Backward compatibility: if first arg is not a known subcommand,
     # assume "analyze" mode (legacy CLI: pcb-crossing-optimizer file.net --layers ...)
-    known_commands = {"analyze", "plan-footprint", "-h", "--help"}
+    known_commands = {"analyze", "plan-footprint", "place", "-h", "--help"}
     argv = sys.argv[1:]
     if argv and argv[0] not in known_commands:
         argv = ["analyze"] + argv

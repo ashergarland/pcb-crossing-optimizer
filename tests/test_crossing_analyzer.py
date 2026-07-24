@@ -1,12 +1,10 @@
 """Tests for the PCB Crossing Optimizer (sweep-only API)."""
 
+import subprocess
 import sys
 from pathlib import Path
 
-# Add src to path
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
-
-from crossing_analyzer import (
+from crossing_analyzer._core import (
     PinColumn,
     LayerEdge,
     LayerPairCrossing,
@@ -498,9 +496,8 @@ import subprocess
 
 def _run_cli(*args: str) -> subprocess.CompletedProcess:
     """Run pcb-crossing-optimizer CLI via python -m style."""
-    src = str(Path(__file__).resolve().parent.parent / "src" / "crossing_analyzer.py")
     return subprocess.run(
-        [sys.executable, src, *args],
+        [sys.executable, "-m", "crossing_analyzer._core", *args],
         capture_output=True, text=True,
     )
 

@@ -4,13 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pcb-crossing-optimizer"
-version = "0.5.0"
-description = "Multi-layer crossing minimization for PCB connector pin assignment"
+version = "0.6.0"
+description = "PCB crossing minimization, component placement, and power trace validation for SKiDL-generated netlists"
 requires-python = ">=3.10"
 license = "MIT"
 authors = [{ name = "Asher Garland" }]
 readme = "README.md"
-keywords = ["pcb", "kicad", "eda", "skidl", "crossing", "routing", "pin-assignment"]
+keywords = ["pcb", "kicad", "eda", "skidl", "crossing", "routing", "pin-assignment", "placement"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
@@ -23,13 +23,13 @@ Homepage = "https://github.com/ashergarland/pcb-crossing-optimizer"
 Repository = "https://github.com/ashergarland/pcb-crossing-optimizer"
 
 [project.scripts]
-pcb-crossing-optimizer = "crossing_analyzer:main"
+pcb-crossing-optimizer = "crossing_analyzer._core:main"
 
 [tool.setuptools]
-py-modules = ["crossing_analyzer"]
+packages = ["crossing_analyzer"]
 
-[tool.setuptools.packages.find]
-where = ["src"]
+[tool.setuptools.package-dir]
+crossing_analyzer = "src"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
