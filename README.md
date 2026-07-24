@@ -1,14 +1,19 @@
 # PCB Crossing Optimizer
 
-PCB design automation: crossing minimization, component placement, and power trace validation for KiCad netlists. Designed for AI-agent-driven PCB workflows via the [skidl-vscode](https://github.com/ashergarland/skidl-vscode) MCP server.
+**The algorithms behind AI-native PCB design.** This library powers the optimization pipeline in [skidl-vscode](https://github.com/ashergarland/skidl-vscode) — turning netlists into placement-optimized, crossing-free board layouts that any AI agent can produce.
 
-## Features
+```
+Netlist (.net) → Pin ordering → Component placement → Power validation → JSON output
+                 (zero crossings)  (zero overlaps)     (IPC-2152)        (any EDA tool)
+```
 
-- **Crossing analysis** — Sugiyama-style barycenter sweep to minimize trace crossings and compute optimal pin orderings
-- **Footprint planning** — Compute optimal pin-to-net assignments for custom footprint design
-- **Component placement** — Hybrid force-directed + simulated annealing auto-placement
-- **Power trace validation** — IPC-2152 trace width calculations for current-carrying nets
-- **Decoupling analysis** — Verify bypass capacitor proximity to IC power pins
+When an AI agent uses the skidl-vscode MCP server to design a PCB, this library does the heavy math:
+
+- **Crossing analysis** — Sugiyama-style barycenter sweep eliminates trace crossings by computing optimal pin orderings
+- **Footprint planning** — Pin-to-net assignment for custom footprints, respecting locks and anchor layers
+- **Component placement** — Hybrid force-directed + simulated annealing computes positions that minimize wire length, avoid overlaps, and keep decoupling caps near their ICs
+- **Power trace validation** — IPC-2152 calculations flag nets where trace width may be insufficient for the current load
+- **EDA-agnostic output** — All results are JSON: `{ref: {x, y, rotation, layer}}` — works with KiCad, Altium, EasyEDA, or any tool
 
 ## Installation
 
@@ -17,6 +22,12 @@ pip install pcb-crossing-optimizer
 ```
 
 After installation, the `pcb-crossing-optimizer` command is available on your PATH.
+
+## How to use this
+
+**Most users** should install the [skidl-vscode extension](https://github.com/ashergarland/skidl-vscode) — it provides the full end-to-end experience (schematic validation + crossing optimization + placement + power validation) via MCP tools that AI agents call automatically.
+
+**Library developers** and **CLI users** can use this package directly for crossing analysis, placement, and power validation on KiCad netlists.
 
 ## Usage
 
