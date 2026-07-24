@@ -2,8 +2,10 @@ name: Publish to PyPI
 
 on:
   push:
-    tags:
-      - "v*"
+    branches: [main]
+    paths:
+      - "src/**"
+      - "pyproject.toml"
 
 jobs:
   publish:
@@ -22,3 +24,5 @@ jobs:
         run: python -m build
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true

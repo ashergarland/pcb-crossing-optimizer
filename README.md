@@ -79,9 +79,10 @@ are handled automatically via virtual pass-through nodes.
 ## Project structure
 
 ```
-src/crossing_analyzer.py    Core logic + CLI
+src/crossing_analyzer.py        Core logic + CLI
 tests/                      pytest tests
 examples/                   Sample netlists for testing
+.github/workflows/          CI / PyPI publishing
 ```
 
 ## Running tests
@@ -91,12 +92,6 @@ pip install pytest
 pytest -v
 ```
 
-## Roadmap
-
-- Passive placement optimizer (assign positions to resistors/caps in routing channel)
-- F.Cu/B.Cu layer assignment for unavoidable crossings
-- Migration to skidl-vscode extension (core/crossing.py + MCP tool + VS Code command)
-
 ## Python import
 
 The PyPI package name is `pcb-crossing-optimizer`, but the importable module is `crossing_analyzer`:
@@ -104,3 +99,41 @@ The PyPI package name is `pcb-crossing-optimizer`, but the importable module is 
 ```python
 from crossing_analyzer import sweep_optimize, PinColumn, format_multilayer_report
 ```
+
+## Publishing to PyPI
+
+Releases are published automatically via GitHub Actions trusted publishing (OIDC — no API tokens needed).
+
+### Setup (one-time)
+
+1. On [pypi.org](https://pypi.org), go to your project → **Publishing** → **Add a new publisher**
+2. Configure the trusted publisher:
+   - **Owner**: `ashergarland`
+   - **Repository**: `pcb-crossing-optimizer`
+   - **Workflow**: `publish.yml`
+   - **Environment**: `pypi`
+3. On GitHub, go to **Settings → Environments** and create an environment named `pypi`
+
+### Releasing a new version
+
+1. Update the version in `pyproject.toml`
+2. Commit and push
+3. Tag and push the tag:
+   ```
+   git tag v0.5.0
+   git push origin v0.5.0
+   ```
+4. The `publish.yml` workflow triggers on `v*` tags and publishes to PyPI automatically
+
+### Manual publishing (fallback)
+
+```bash
+pip install build twine
+python -m build
+twine upload dist/*
+```
+
+## Roadmap
+
+- Passive placement optimizer (assign positions to resistors/caps in routing channel)
+- F.Cu/B.Cu layer assignment for unavoidable crossings

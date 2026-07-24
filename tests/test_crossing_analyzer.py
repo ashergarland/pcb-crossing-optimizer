@@ -1,4 +1,4 @@
-"""Tests for the crossing analyzer (sweep-only API)."""
+"""Tests for the PCB Crossing Optimizer (sweep-only API)."""
 
 import sys
 from pathlib import Path
@@ -497,7 +497,7 @@ def test_report_to_dict_no_virtual_refs():
 import subprocess
 
 def _run_cli(*args: str) -> subprocess.CompletedProcess:
-    """Run crossing-analyzer CLI via python -m style."""
+    """Run pcb-crossing-optimizer CLI via python -m style."""
     src = str(Path(__file__).resolve().parent.parent / "src" / "crossing_analyzer.py")
     return subprocess.run(
         [sys.executable, src, *args],

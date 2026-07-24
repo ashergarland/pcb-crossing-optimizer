@@ -1,4 +1,4 @@
-"""Crossing analyzer for SKiDL-generated netlists.
+"""PCB Crossing Optimizer – crossing minimization for SKiDL-generated netlists.
 
 Detects trace crossings across component layers and computes optimal
 pin orderings for reorderable connectors to minimize or eliminate
@@ -1236,7 +1236,7 @@ def main():
         "analyze",
         help="Analyze crossings between component layers.",
         epilog=(
-            "Example: crossing-analyzer analyze net.net "
+            "Example: pcb-crossing-optimizer analyze net.net "
             "--layers 'J1 | R1,C1 | J2' --reorderable J2"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -1273,7 +1273,7 @@ def main():
         "plan-footprint",
         help="Compute an optimal pin map for a custom footprint.",
         epilog=(
-            "Example: crossing-analyzer plan-footprint net.net "
+            "Example: pcb-crossing-optimizer plan-footprint net.net "
             "--target J1 --anchors 'J2,U1 | R1,R2,C1' "
             "--lock 1=NC 2=NC 3=GND_EARLY_A"
         ),
@@ -1314,7 +1314,7 @@ def main():
     plan.set_defaults(func=_cmd_plan_footprint)
 
     # Backward compatibility: if first arg is not a known subcommand,
-    # assume "analyze" mode (legacy CLI: crossing-analyzer file.net --layers ...)
+    # assume "analyze" mode (legacy CLI: pcb-crossing-optimizer file.net --layers ...)
     known_commands = {"analyze", "plan-footprint", "-h", "--help"}
     argv = sys.argv[1:]
     if argv and argv[0] not in known_commands:
